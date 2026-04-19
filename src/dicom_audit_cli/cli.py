@@ -4,7 +4,13 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-from dicom_audit_cli.audit import merge_phase_aliases, scan_root
+from dicom_audit_cli.audit import (
+    DEFAULT_BATCH_TAGS,
+    DEFAULT_CRITICAL_TAGS,
+    normalize_suffixes,
+    normalize_tag_list,
+    scan_root,
+)
 from dicom_audit_cli.reporting import (
     build_payload,
     write_json_report,
@@ -15,7 +21,7 @@ from dicom_audit_cli.reporting import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Recursively scan a DICOM root directory and emit JSON, Markdown, and PDF audit reports."
+        description="Recursively scan a DICOM root directory and generate parameter-consistency reports."
     )
     parser.add_argument("--root", required=True, help="Root folder to scan recursively.")
     parser.add_argument(
@@ -24,24 +30,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--title",
-        default="DICOM 技术完整性审计报告",
+        default="DICOM 参数一致性审计报告",
         help="Report title.",
     )
     parser.add_argument(
         "--modality",
-        default="CT",
-        help="Expected modality. Defaults to CT.",
+        default="",
+        help="Optional modality filter, e.g. CT. Default is no modality filter.",
     )
     parser.add_argument(
-        "--expected-phases",
-        default="arterial,portal,noncontrast",
-        help="Comma-separated expected phases.",
-    )
-    parser.add_argument(
-        "--phase-alias",
+        "--batch-field",
         action="append",
         default=[],
-        help="Additional phase alias mapping, e.g. AP=arterial.",
+        help="DICOM tag used to define parameter batches. Repeatable.",
+    )
+    parser.add_argument(
+        "--critical-tag",
+        action="append",
+        default=[],
+        help="DICOM tag that should exist for reliable parameter checking. Repeatable.",
     )
     parser.add_argument(
         "--exclude-dir",
@@ -68,19 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def normalize_suffixes(raw_values: list[str]) -> list[str]:
-    normalized: list[str] = []
-    for value in raw_values:
-        suffix = value.strip().lower()
-        if not suffix:
-            continue
-        if not suffix.startswith("."):
-            suffix = f".{suffix}"
-        if suffix not in normalized:
-            normalized.append(suffix)
-    return normalized or [".dcm"]
-
-
 def ensure_output_dir(raw_output_dir: str | None) -> Path:
     if raw_output_dir:
         output_dir = Path(raw_output_dir).expanduser().resolve()
@@ -100,25 +94,28 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--root does not point to an existing directory: {root}")
 
     output_dir = ensure_output_dir(args.output_dir)
-    expected_phases = [item.strip().lower() for item in args.expected_phases.split(",") if item.strip()]
-    aliases = merge_phase_aliases(args.phase_alias)
-    excluded_names = {item.strip().lower() for item in args.exclude_dir if item.strip()}
     suffixes = normalize_suffixes(args.suffix)
+    excluded_names = {item.strip().lower() for item in args.exclude_dir if item.strip()}
+    batch_tags = normalize_tag_list(args.batch_field, DEFAULT_BATCH_TAGS)
+    critical_tags = normalize_tag_list(args.critical_tag, DEFAULT_CRITICAL_TAGS)
+    include_modality = args.modality.strip() or None
 
-    summary, case_findings, series_findings = scan_root(
+    summary, case_findings, batch_findings, series_findings = scan_root(
         root=root,
-        expected_phases=expected_phases,
-        aliases=aliases,
         suffixes=suffixes,
         excluded_names=excluded_names,
         all_files=args.all_files,
         case_regex=args.case_regex,
-        required_modality=args.modality,
+        batch_tags=batch_tags,
+        critical_tags=critical_tags,
+        include_modality=include_modality,
     )
+
     payload = build_payload(
         title=args.title,
-        summary=summary,
+        summary=summary.to_dict(),
         cases=[item.to_dict() for item in case_findings],
+        batches=[item.to_dict() for item in batch_findings],
         series=[item.to_dict() for item in series_findings],
     )
 
@@ -131,10 +128,10 @@ def main(argv: list[str] | None = None) -> int:
     write_pdf_report(pdf_path, payload)
 
     print(f"root={root}")
-    print(f"total_candidate_files={summary['total_candidate_files']}")
-    print(f"total_series_dirs={summary['total_series_dirs']}")
-    print(f"total_cases={summary['total_cases']}")
-    print(f"complete_cases={summary['complete_cases']}")
+    print(f"total_candidate_files={summary.total_candidate_files}")
+    print(f"total_series_dirs={summary.total_series_dirs}")
+    print(f"total_cases={summary.total_cases}")
+    print(f"total_batches={summary.total_batches}")
     print(f"json_report={json_path}")
     print(f"markdown_report={md_path}")
     print(f"pdf_report={pdf_path}")

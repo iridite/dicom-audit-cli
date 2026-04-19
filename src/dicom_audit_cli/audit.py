@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -7,73 +8,32 @@ from pathlib import Path
 
 import pydicom
 
-from dicom_audit_cli.models import CaseFinding, SeriesFinding
+from dicom_audit_cli.models import AuditSummary, BatchFinding, CaseFinding, SeriesFinding
 
 
-REQUIRED_TAGS = {
-    "Modality": "Modality",
-    "Rows": "Rows",
-    "Columns": "Columns",
-    "PixelSpacing": "PixelSpacing",
-    "SliceThickness": "SliceThickness",
-    "ImagePositionPatient": "ImagePositionPatient",
-    "ImageOrientationPatient": "ImageOrientationPatient",
-    "RescaleIntercept": "RescaleIntercept",
-    "RescaleSlope": "RescaleSlope",
-    "StudyInstanceUID": "StudyInstanceUID",
-    "SeriesInstanceUID": "SeriesInstanceUID",
-    "SOPInstanceUID": "SOPInstanceUID",
-}
+DEFAULT_BATCH_TAGS = [
+    "Modality",
+    "Manufacturer",
+    "ManufacturerModelName",
+    "Rows",
+    "Columns",
+    "PixelSpacing",
+    "SliceThickness",
+    "ImageOrientationPatient",
+    "ConvolutionKernel",
+    "KVP",
+]
 
-DEFAULT_PHASE_ALIASES = {
-    "ap": "arterial",
-    "arterial": "arterial",
-    "artery": "arterial",
-    "art": "arterial",
-    "pvp": "portal",
-    "portal": "portal",
-    "pv": "portal",
-    "venous": "portal",
-    "nc": "noncontrast",
-    "noncontrast": "noncontrast",
-    "non-contrast": "noncontrast",
-    "plain": "noncontrast",
-    "precontrast": "noncontrast",
-    "pre-contrast": "noncontrast",
-}
+DEFAULT_CRITICAL_TAGS = [
+    "Modality",
+    "Rows",
+    "Columns",
+    "PixelSpacing",
+    "SliceThickness",
+    "ImageOrientationPatient",
+]
 
 SEVERITY_ORDER = {"ok": 0, "warning": 1, "error": 2}
-SERIES_ERROR_ISSUES = {
-    "no_readable_dicom",
-    "unexpected_modality",
-    "required_tags_missing",
-    "mixed_series_uid",
-    "duplicate_sop_uid",
-}
-SERIES_WARNING_ISSUES = {
-    "unreadable_files_present",
-    "pixel_spacing_inconsistent",
-    "slice_thickness_inconsistent",
-    "orientation_inconsistent",
-    "instance_number_duplicate_or_missing",
-    "image_position_duplicate_or_missing",
-    "series_description_empty",
-    "unknown_phase",
-}
-
-
-def merge_phase_aliases(extra_aliases: list[str]) -> dict[str, str]:
-    aliases = dict(DEFAULT_PHASE_ALIASES)
-    for raw_item in extra_aliases:
-        if "=" not in raw_item:
-            raise ValueError(f"Invalid --phase-alias value: {raw_item}")
-        alias, target = raw_item.split("=", 1)
-        alias = alias.strip().lower()
-        target = target.strip().lower()
-        if not alias or not target:
-            raise ValueError(f"Invalid --phase-alias value: {raw_item}")
-        aliases[alias] = target
-    return aliases
 
 
 def normalize_value(value) -> str | None:
@@ -82,19 +42,6 @@ def normalize_value(value) -> str | None:
     if isinstance(value, (list, tuple)):
         return "|".join(str(item) for item in value)
     return str(value)
-
-
-def normalize_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", text.lower())
-
-
-def simplify_series_description(text: str | None) -> str:
-    if not text:
-        return ""
-    normalized = normalize_text(text)
-    for token in ("contrast", "ce", "cplus", "cminus"):
-        normalized = normalized.replace(token, "")
-    return normalized
 
 
 def infer_case_id(relative_dir: Path, case_pattern: re.Pattern[str]) -> str:
@@ -106,31 +53,40 @@ def infer_case_id(relative_dir: Path, case_pattern: re.Pattern[str]) -> str:
     return "unknown-case"
 
 
-def infer_phase(relative_dir: Path, series_description: str | None, aliases: dict[str, str]) -> tuple[str, str]:
-    path_parts = [normalize_text(part) for part in relative_dir.parts]
-    for token in reversed(path_parts):
-        if token in aliases:
-            return aliases[token], "path"
-
-    if series_description:
-        description_text = normalize_text(series_description)
-        for alias, phase in aliases.items():
-            if normalize_text(alias) and normalize_text(alias) in description_text:
-                return phase, "series_description"
-
-    return "unknown", "unknown"
-
-
-def severity_from_issues(issues: list[str]) -> str:
-    if any(issue in SERIES_ERROR_ISSUES for issue in issues):
-        return "error"
-    if issues:
-        return "warning"
-    return "ok"
+def infer_series_label(relative_dir: Path) -> str:
+    if not relative_dir.parts:
+        return "unknown-series"
+    if len(relative_dir.parts) >= 2:
+        return relative_dir.parts[-2]
+    return relative_dir.parts[-1]
 
 
 def should_skip(path: Path, excluded_names: set[str]) -> bool:
     return any(part.lower() in excluded_names for part in path.parts)
+
+
+def normalize_suffixes(raw_values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in raw_values:
+        suffix = value.strip().lower()
+        if not suffix:
+            continue
+        if not suffix.startswith("."):
+            suffix = f".{suffix}"
+        if suffix not in normalized:
+            normalized.append(suffix)
+    return normalized or [".dcm"]
+
+
+def normalize_tag_list(raw_values: list[str], defaults: list[str]) -> list[str]:
+    if not raw_values:
+        return list(defaults)
+    normalized: list[str] = []
+    for item in raw_values:
+        tag = item.strip()
+        if tag and tag not in normalized:
+            normalized.append(tag)
+    return normalized or list(defaults)
 
 
 def discover_series_files(
@@ -167,241 +123,180 @@ def read_datasets(file_paths: list[Path]) -> tuple[list[pydicom.Dataset], int]:
     return datasets, unreadable_count
 
 
+def severity_from_series_issues(issues: list[str], missing_critical_tags: list[str], readable_count: int) -> str:
+    if readable_count == 0:
+        return "error"
+    if missing_critical_tags:
+        return "warning"
+    if issues:
+        return "warning"
+    return "ok"
+
+
+def collect_parameter_values(datasets: list[pydicom.Dataset], tags: list[str]) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {}
+    for tag in tags:
+        uniques = sorted(
+            {
+                normalize_value(getattr(ds, tag, None))
+                for ds in datasets
+                if getattr(ds, tag, None) is not None
+            }
+        )
+        values[tag] = [value for value in uniques if value is not None]
+    return values
+
+
+def build_batch_values(parameter_values: dict[str, list[str]], batch_tags: list[str]) -> dict[str, str]:
+    batch_values: dict[str, str] = {}
+    for tag in batch_tags:
+        values = parameter_values.get(tag, [])
+        if not values:
+            batch_values[tag] = "<missing>"
+        elif len(values) == 1:
+            batch_values[tag] = values[0]
+        else:
+            batch_values[tag] = "<varies>"
+    return batch_values
+
+
 def audit_series_dir(
     root: Path,
     series_dir: Path,
     file_paths: list[Path],
-    aliases: dict[str, str],
     case_pattern: re.Pattern[str],
-    required_modality: str | None,
+    batch_tags: list[str],
+    critical_tags: list[str],
+    include_modality: str | None,
 ) -> SeriesFinding:
     relative_dir = series_dir.relative_to(root)
+    case_id = infer_case_id(relative_dir, case_pattern)
+    series_label = infer_series_label(relative_dir)
     datasets, unreadable_count = read_datasets(file_paths)
     file_count = len(file_paths)
-    issues: list[str] = []
 
     if not datasets:
-        issues.append("no_readable_dicom")
         return SeriesFinding(
-            case_id=infer_case_id(relative_dir, case_pattern),
-            phase="unknown",
-            phase_source="unknown",
+            case_id=case_id,
+            series_label=series_label,
             relative_dir=str(relative_dir),
             series_dir=str(series_dir),
             file_count=file_count,
             readable_count=0,
             unreadable_count=unreadable_count,
-            modality=None,
-            series_description=None,
-            manufacturer=None,
-            manufacturer_model_name=None,
-            convolution_kernel=None,
-            pixel_spacing_unique=[],
-            slice_thickness_unique=[],
-            orientation_unique=[],
-            series_uid_unique_count=0,
-            sop_uid_unique_count=0,
-            instance_number_unique_count=0,
-            image_position_unique_count=0,
-            required_tag_missing=list(REQUIRED_TAGS),
-            issues=issues,
+            parameter_values={tag: [] for tag in sorted(set(batch_tags + critical_tags))},
+            batch_values={tag: "<missing>" for tag in batch_tags},
+            varying_parameters=[],
+            missing_critical_tags=list(critical_tags),
+            issues=["no_readable_dicom"],
             severity="error",
+            batch_signature=json.dumps({tag: "<missing>" for tag in batch_tags}, ensure_ascii=False, sort_keys=True),
         )
+
+    audit_tags = sorted(set(batch_tags + critical_tags))
+    parameter_values = collect_parameter_values(datasets, audit_tags)
+    varying_parameters = [tag for tag, values in parameter_values.items() if len(values) > 1]
+    missing_critical_tags = [tag for tag in critical_tags if not parameter_values.get(tag)]
+    issues: list[str] = []
 
     if unreadable_count:
         issues.append("unreadable_files_present")
+    if varying_parameters:
+        issues.append("within_series_parameter_variation")
+    if missing_critical_tags:
+        issues.append("critical_tags_missing")
 
-    sample = datasets[0]
-    required_tag_missing = [
-        name
-        for name, key in REQUIRED_TAGS.items()
-        if any(getattr(ds, key, None) is None for ds in datasets)
-    ]
-    if required_tag_missing:
-        issues.append("required_tags_missing")
+    if include_modality:
+        modality_values = parameter_values.get("Modality", [])
+        if modality_values and any(value.upper() != include_modality.upper() for value in modality_values):
+            issues.append("modality_mismatch")
 
-    pixel_spacing_unique = sorted(
-        {
-            normalize_value(getattr(ds, "PixelSpacing", None))
-            for ds in datasets
-            if getattr(ds, "PixelSpacing", None) is not None
-        }
-    )
-    slice_thickness_unique = sorted(
-        {
-            normalize_value(getattr(ds, "SliceThickness", None))
-            for ds in datasets
-            if getattr(ds, "SliceThickness", None) is not None
-        }
-    )
-    orientation_unique = sorted(
-        {
-            normalize_value(getattr(ds, "ImageOrientationPatient", None))
-            for ds in datasets
-            if getattr(ds, "ImageOrientationPatient", None) is not None
-        }
-    )
-    series_uids = {
-        normalize_value(getattr(ds, "SeriesInstanceUID", None))
-        for ds in datasets
-        if getattr(ds, "SeriesInstanceUID", None) is not None
-    }
-    sop_uids = [
-        normalize_value(getattr(ds, "SOPInstanceUID", None))
-        for ds in datasets
-        if getattr(ds, "SOPInstanceUID", None) is not None
-    ]
-    instance_numbers = [
-        normalize_value(getattr(ds, "InstanceNumber", None))
-        for ds in datasets
-        if getattr(ds, "InstanceNumber", None) is not None
-    ]
-    image_positions = [
-        normalize_value(getattr(ds, "ImagePositionPatient", None))
-        for ds in datasets
-        if getattr(ds, "ImagePositionPatient", None) is not None
-    ]
-
-    if len(pixel_spacing_unique) > 1:
-        issues.append("pixel_spacing_inconsistent")
-    if len(slice_thickness_unique) > 1:
-        issues.append("slice_thickness_inconsistent")
-    if len(orientation_unique) > 1:
-        issues.append("orientation_inconsistent")
-    if len(series_uids) > 1:
-        issues.append("mixed_series_uid")
-    if len(set(sop_uids)) != len(sop_uids):
-        issues.append("duplicate_sop_uid")
-    if instance_numbers and len(set(instance_numbers)) != len(datasets):
-        issues.append("instance_number_duplicate_or_missing")
-    if image_positions and len(set(image_positions)) != len(datasets):
-        issues.append("image_position_duplicate_or_missing")
-
-    modality = normalize_value(getattr(sample, "Modality", None))
-    if required_modality and modality and modality.upper() != required_modality.upper():
-        issues.append("unexpected_modality")
-
-    series_description = normalize_value(getattr(sample, "SeriesDescription", None))
-    if not series_description:
-        issues.append("series_description_empty")
-
-    phase, phase_source = infer_phase(relative_dir, series_description, aliases)
-    if phase == "unknown":
-        issues.append("unknown_phase")
+    batch_values = build_batch_values(parameter_values, batch_tags)
+    batch_signature = json.dumps(batch_values, ensure_ascii=False, sort_keys=True)
+    severity = severity_from_series_issues(issues, missing_critical_tags, len(datasets))
 
     return SeriesFinding(
-        case_id=infer_case_id(relative_dir, case_pattern),
-        phase=phase,
-        phase_source=phase_source,
+        case_id=case_id,
+        series_label=series_label,
         relative_dir=str(relative_dir),
         series_dir=str(series_dir),
         file_count=file_count,
         readable_count=len(datasets),
         unreadable_count=unreadable_count,
-        modality=modality,
-        series_description=series_description,
-        manufacturer=normalize_value(getattr(sample, "Manufacturer", None)),
-        manufacturer_model_name=normalize_value(getattr(sample, "ManufacturerModelName", None)),
-        convolution_kernel=normalize_value(getattr(sample, "ConvolutionKernel", None)),
-        pixel_spacing_unique=[value for value in pixel_spacing_unique if value is not None],
-        slice_thickness_unique=[value for value in slice_thickness_unique if value is not None],
-        orientation_unique=[value for value in orientation_unique if value is not None],
-        series_uid_unique_count=len(series_uids),
-        sop_uid_unique_count=len(set(sop_uids)),
-        instance_number_unique_count=len(set(instance_numbers)),
-        image_position_unique_count=len(set(image_positions)),
-        required_tag_missing=required_tag_missing,
+        parameter_values=parameter_values,
+        batch_values=batch_values,
+        varying_parameters=varying_parameters,
+        missing_critical_tags=missing_critical_tags,
         issues=issues,
-        severity=severity_from_issues(issues),
+        severity=severity,
+        batch_signature=batch_signature,
     )
 
 
-def build_case_findings(
-    series_findings: list[SeriesFinding],
-    expected_phases: list[str],
-) -> list[CaseFinding]:
+def assign_batches(series_findings: list[SeriesFinding], batch_tags: list[str]) -> list[BatchFinding]:
     grouped: dict[str, list[SeriesFinding]] = defaultdict(list)
-    for series in series_findings:
-        grouped[series.case_id].append(series)
+    for item in series_findings:
+        grouped[item.batch_signature].append(item)
+
+    ordered_groups = sorted(
+        grouped.items(),
+        key=lambda item: (-len(item[1]), min(series.case_id for series in item[1]), item[0]),
+    )
+
+    batches: list[BatchFinding] = []
+    for index, (signature, items) in enumerate(ordered_groups, start=1):
+        batch_id = f"B{index:03d}"
+        for item in items:
+            item.batch_id = batch_id
+        case_ids = sorted({item.case_id for item in items})
+        series_labels = sorted({item.series_label for item in items})
+        representative_values = {tag: items[0].batch_values[tag] for tag in batch_tags}
+        batches.append(
+            BatchFinding(
+                batch_id=batch_id,
+                batch_signature=signature,
+                series_count=len(items),
+                case_count=len(case_ids),
+                case_ids=case_ids,
+                series_labels=series_labels,
+                representative_values=representative_values,
+            )
+        )
+
+    return batches
+
+
+def build_case_findings(series_findings: list[SeriesFinding], batch_tags: list[str]) -> list[CaseFinding]:
+    grouped: dict[str, list[SeriesFinding]] = defaultdict(list)
+    for item in series_findings:
+        grouped[item.case_id].append(item)
 
     case_findings: list[CaseFinding] = []
     for case_id in sorted(grouped):
-        series_list = grouped[case_id]
-        recognized_phase_map: dict[str, list[SeriesFinding]] = defaultdict(list)
-        unknown_phase_series: list[str] = []
-        issues: list[str] = []
-        series_issue_summary = sorted({issue for series in series_list for issue in series.issues})
+        items = sorted(grouped[case_id], key=lambda item: item.relative_dir)
+        batch_ids = sorted({item.batch_id for item in items})
+        varying_fields: list[str] = []
+        for tag in batch_tags:
+            values = {item.batch_values[tag] for item in items}
+            if len(values) > 1:
+                varying_fields.append(tag)
+
+        within_series_issues = sorted({issue for item in items for issue in item.issues})
         severity = "ok"
-
-        for series in series_list:
-            severity = max(severity, series.severity, key=SEVERITY_ORDER.get)
-            if series.phase == "unknown":
-                unknown_phase_series.append(series.relative_dir)
-            else:
-                recognized_phase_map[series.phase].append(series)
-
-        missing_phases = [phase for phase in expected_phases if phase not in recognized_phase_map]
-        if missing_phases:
-            issues.append(f"missing_expected_phases:{','.join(missing_phases)}")
+        if any(item.severity == "error" for item in items):
             severity = "error"
-
-        duplicate_phase_map = {
-            phase: [item.relative_dir for item in items]
-            for phase, items in recognized_phase_map.items()
-            if len(items) > 1
-        }
-        if duplicate_phase_map:
-            issues.append("duplicate_phase_series")
-            severity = max(severity, "warning", key=SEVERITY_ORDER.get)
-
-        if unknown_phase_series:
-            issues.append("unknown_phase_series_present")
-            severity = max(severity, "warning", key=SEVERITY_ORDER.get)
-
-        cross_phase_series = {
-            phase: items[0]
-            for phase, items in recognized_phase_map.items()
-            if len(items) == 1
-        }
-        comparable_series = [
-            cross_phase_series[phase]
-            for phase in expected_phases
-            if phase in cross_phase_series
-        ]
-        if len(comparable_series) >= 2:
-            thickness_values = {
-                tuple(item.slice_thickness_unique)
-                for item in comparable_series
-                if item.slice_thickness_unique
-            }
-            spacing_values = {
-                tuple(item.pixel_spacing_unique)
-                for item in comparable_series
-                if item.pixel_spacing_unique
-            }
-            description_values = {
-                simplify_series_description(item.series_description)
-                for item in comparable_series
-            }
-            if len(thickness_values) > 1:
-                issues.append("cross_phase_slice_thickness_inconsistent")
-                severity = max(severity, "warning", key=SEVERITY_ORDER.get)
-            if len(spacing_values) > 1:
-                issues.append("cross_phase_pixel_spacing_inconsistent")
-                severity = max(severity, "warning", key=SEVERITY_ORDER.get)
-            if len(description_values) > 1:
-                issues.append("cross_phase_series_description_mismatch")
-                severity = max(severity, "warning", key=SEVERITY_ORDER.get)
+        elif batch_ids and len(batch_ids) > 1 or varying_fields or within_series_issues:
+            severity = "warning"
 
         case_findings.append(
             CaseFinding(
                 case_id=case_id,
-                recognized_phases=sorted(recognized_phase_map),
-                missing_phases=missing_phases,
-                unknown_phase_series=sorted(unknown_phase_series),
-                duplicate_phase_map=duplicate_phase_map,
-                series_issue_summary=series_issue_summary,
-                issues=issues,
+                series_count=len(items),
+                batch_ids=batch_ids,
+                batch_count=len(batch_ids),
+                varying_fields=varying_fields,
+                within_series_issues=within_series_issues,
+                series_dirs=[item.relative_dir for item in items],
                 severity=severity,
             )
         )
@@ -409,48 +304,67 @@ def build_case_findings(
     return case_findings
 
 
+def build_parameter_variation(series_findings: list[SeriesFinding], batch_tags: list[str]) -> dict[str, dict[str, object]]:
+    variation: dict[str, dict[str, object]] = {}
+    for tag in batch_tags:
+        values = Counter(item.batch_values[tag] for item in series_findings)
+        variation[tag] = {
+            "distinct_value_count": len(values),
+            "top_values": [
+                {"value": value, "series_count": count}
+                for value, count in values.most_common(10)
+            ],
+        }
+    return variation
+
+
 def build_summary(
     root: Path,
     total_candidate_files: int,
+    batch_tags: list[str],
+    critical_tags: list[str],
     series_findings: list[SeriesFinding],
     case_findings: list[CaseFinding],
-    expected_phases: list[str],
-    aliases: dict[str, str],
-) -> dict:
-    severity_counter = Counter(series.severity for series in series_findings)
-    case_severity_counter = Counter(case.severity for case in case_findings)
-    issue_counter = Counter()
-    for series in series_findings:
-        issue_counter.update(series.issues)
-    for case in case_findings:
-        issue_counter.update(case.issues)
+    batches: list[BatchFinding],
+) -> AuditSummary:
+    series_severity_counts = Counter(item.severity for item in series_findings)
+    case_severity_counts = Counter(item.severity for item in case_findings)
+    issue_counts = Counter()
+    for item in series_findings:
+        issue_counts.update(item.issues)
+    for item in case_findings:
+        issue_counts.update(item.within_series_issues)
+        if item.batch_count > 1:
+            issue_counts["multiple_batches_within_case"] += 1
+        for tag in item.varying_fields:
+            issue_counts[f"case_field_variation:{tag}"] += 1
 
-    complete_cases = sum(1 for case in case_findings if not case.missing_phases)
-    return {
-        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "root": str(root),
-        "expected_phases": expected_phases,
-        "phase_aliases": aliases,
-        "total_candidate_files": total_candidate_files,
-        "total_series_dirs": len(series_findings),
-        "total_cases": len(case_findings),
-        "complete_cases": complete_cases,
-        "series_severity_counts": dict(sorted(severity_counter.items())),
-        "case_severity_counts": dict(sorted(case_severity_counter.items())),
-        "issue_counts": dict(sorted(issue_counter.items())),
-    }
+    return AuditSummary(
+        generated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        root=str(root),
+        total_candidate_files=total_candidate_files,
+        total_series_dirs=len(series_findings),
+        total_cases=len(case_findings),
+        total_batches=len(batches),
+        batch_fields=batch_tags,
+        critical_tags=critical_tags,
+        series_severity_counts=dict(sorted(series_severity_counts.items())),
+        case_severity_counts=dict(sorted(case_severity_counts.items())),
+        issue_counts=dict(sorted(issue_counts.items())),
+        parameter_variation=build_parameter_variation(series_findings, batch_tags),
+    )
 
 
 def scan_root(
     root: Path,
-    expected_phases: list[str],
-    aliases: dict[str, str],
     suffixes: list[str],
     excluded_names: set[str],
     all_files: bool,
     case_regex: str,
-    required_modality: str | None,
-) -> tuple[dict, list[CaseFinding], list[SeriesFinding]]:
+    batch_tags: list[str],
+    critical_tags: list[str],
+    include_modality: str | None,
+) -> tuple[AuditSummary, list[CaseFinding], list[BatchFinding], list[SeriesFinding]]:
     case_pattern = re.compile(case_regex)
     grouped_files, total_candidate_files = discover_series_files(
         root=root,
@@ -466,21 +380,24 @@ def scan_root(
             root=root,
             series_dir=series_dir,
             file_paths=file_paths,
-            aliases=aliases,
             case_pattern=case_pattern,
-            required_modality=required_modality,
+            batch_tags=batch_tags,
+            critical_tags=critical_tags,
+            include_modality=include_modality,
         )
         for series_dir, file_paths in sorted(grouped_files.items(), key=lambda item: str(item[0]))
     ]
-    series_findings.sort(key=lambda item: (item.case_id, item.phase, item.relative_dir))
+    series_findings.sort(key=lambda item: (item.case_id, item.relative_dir))
 
-    case_findings = build_case_findings(series_findings, expected_phases)
+    batches = assign_batches(series_findings, batch_tags)
+    case_findings = build_case_findings(series_findings, batch_tags)
     summary = build_summary(
         root=root,
         total_candidate_files=total_candidate_files,
+        batch_tags=batch_tags,
+        critical_tags=critical_tags,
         series_findings=series_findings,
         case_findings=case_findings,
-        expected_phases=expected_phases,
-        aliases=aliases,
+        batches=batches,
     )
-    return summary, case_findings, series_findings
+    return summary, case_findings, batches, series_findings

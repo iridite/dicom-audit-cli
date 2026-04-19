@@ -23,24 +23,24 @@ def format_issue_list(issues: list[str]) -> str:
     return ", ".join(issues)
 
 
-def format_case_issue_list(case: dict) -> str:
-    issue_parts: list[str] = []
-    if case["issues"]:
-        issue_parts.append(", ".join(case["issues"]))
-    if case.get("series_issue_summary"):
-        issue_parts.append(f"series: {', '.join(case['series_issue_summary'])}")
-    return " | ".join(issue_parts) if issue_parts else "无"
+def format_mapping(values: dict[str, str]) -> str:
+    if not values:
+        return "无"
+    return "; ".join(f"{key}={value}" for key, value in values.items())
 
 
-def format_case_phases(case: dict) -> str:
-    return ", ".join(case["recognized_phases"]) if case["recognized_phases"] else "无"
-
-
-def build_payload(title: str, summary: dict, cases: list[dict], series: list[dict]) -> dict:
+def build_payload(
+    title: str,
+    summary: dict,
+    cases: list[dict],
+    batches: list[dict],
+    series: list[dict],
+) -> dict:
     return {
         "title": title,
         "summary": summary,
         "cases": cases,
+        "batches": batches,
         "series": series,
     }
 
@@ -53,6 +53,7 @@ def render_markdown_report(payload: dict) -> str:
     title = payload["title"]
     summary = payload["summary"]
     cases = payload["cases"]
+    batches = payload["batches"]
     series = payload["series"]
 
     lines = [
@@ -64,8 +65,10 @@ def render_markdown_report(payload: dict) -> str:
         f"- 候选 DICOM 文件数：`{summary['total_candidate_files']}`",
         f"- series 目录数：`{summary['total_series_dirs']}`",
         f"- 病例数：`{summary['total_cases']}`",
-        f"- 期相完整病例数：`{summary['complete_cases']}`",
-        f"- 期望期相：`{', '.join(summary['expected_phases'])}`",
+        f"- 参数批次数：`{summary['total_batches']}`",
+        f"- 用于分批的参数字段：`{', '.join(summary['batch_fields'])}`",
+        f"- 关键检查字段：`{', '.join(summary['critical_tags'])}`",
+        "- 批次划分规则：`仅按参数签名分组，不使用病例号、目录名或期相名`",
         "",
         "## 严重度统计",
         "",
@@ -82,18 +85,49 @@ def render_markdown_report(payload: dict) -> str:
             f"{summary['case_severity_counts'].get('error', 0)} |"
         ),
         "",
-        "## 病例概览",
+        "## 全局参数波动",
         "",
-        "| case_id | 状态 | 已识别期相 | 缺失期相 | 问题 |",
-        "| --- | --- | --- | --- | --- |",
+        "| 参数字段 | 不同取值数 | 主要取值（前 5 个） |",
+        "| --- | --- | --- |",
     ]
 
+    for tag, data in summary["parameter_variation"].items():
+        top_values = ", ".join(
+            f"{item['value']} ({item['series_count']})"
+            for item in data["top_values"][:5]
+        )
+        lines.append(f"| {tag} | {data['distinct_value_count']} | {top_values or '无'} |")
+
+    lines.extend(
+        [
+            "",
+            "## 批次概览",
+            "",
+            "| batch_id | series 数 | case 数 | 代表参数 |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for batch in batches:
+        lines.append(
+            f"| {batch['batch_id']} | {batch['series_count']} | {batch['case_count']} | "
+            f"{format_mapping(batch['representative_values'])} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 病例概览",
+            "",
+            "| case_id | series 数 | 批次数 | batch_ids | 波动字段 | 问题 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
     for case in cases:
         lines.append(
-            f"| {case['case_id']} | {severity_label(case['severity'])} | "
-            f"{format_case_phases(case)} | "
-            f"{', '.join(case['missing_phases']) if case['missing_phases'] else '无'} | "
-            f"{format_case_issue_list(case)} |"
+            f"| {case['case_id']} | {case['series_count']} | {case['batch_count']} | "
+            f"{', '.join(case['batch_ids']) or '无'} | "
+            f"{', '.join(case['varying_fields']) or '无'} | "
+            f"{format_issue_list(case['within_series_issues'])} |"
         )
 
     lines.extend(
@@ -101,15 +135,16 @@ def render_markdown_report(payload: dict) -> str:
             "",
             "## Series 详细结果",
             "",
-            "| case_id | phase | 路径 | 文件数 | 可读数 | 状态 | 问题 |",
+            "| case_id | batch_id | 路径 | 文件数 | 可读数 | series 内波动字段 | 分批参数 |",
             "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for item in series:
         lines.append(
-            f"| {item['case_id']} | {item['phase']} | `{item['relative_dir']}` | "
-            f"{item['file_count']} | {item['readable_count']} | {severity_label(item['severity'])} | "
-            f"{format_issue_list(item['issues'])} |"
+            f"| {item['case_id']} | {item['batch_id']} | `{item['relative_dir']}` | "
+            f"{item['file_count']} | {item['readable_count']} | "
+            f"{', '.join(item['varying_parameters']) or '无'} | "
+            f"{format_mapping(item['batch_values'])} |"
         )
 
     return "\n".join(lines) + "\n"
@@ -201,11 +236,13 @@ def write_pdf_report(path: Path, payload: dict) -> None:
 
     summary = payload["summary"]
     cases = payload["cases"]
+    batches = payload["batches"]
     series = payload["series"]
     story = [
         Paragraph(payload["title"], styles["title"]),
         Paragraph(f"生成时间：{summary['generated_at']}", styles["body"]),
         Paragraph(f"扫描根目录：{summary['root']}", styles["body"]),
+        Paragraph("批次划分规则：仅按参数签名分组，不使用病例号、目录名或期相名。", styles["body"]),
         Spacer(1, 6),
         Paragraph("摘要", styles["h1"]),
     ]
@@ -215,70 +252,97 @@ def write_pdf_report(path: Path, payload: dict) -> None:
         ["候选 DICOM 文件数", str(summary["total_candidate_files"])],
         ["series 目录数", str(summary["total_series_dirs"])],
         ["病例数", str(summary["total_cases"])],
-        ["期相完整病例数", str(summary["complete_cases"])],
-        ["期望期相", ", ".join(summary["expected_phases"])],
+        ["参数批次数", str(summary["total_batches"])],
+        ["分批参数字段", ", ".join(summary["batch_fields"])],
+        ["关键检查字段", ", ".join(summary["critical_tags"])],
     ]
     summary_table = LongTable(summary_rows, colWidths=[42 * mm, 132 * mm], repeatRows=1)
     summary_table.setStyle(_table_style())
-    story.extend([summary_table, Spacer(1, 8), Paragraph("病例概览", styles["h1"])])
+    story.extend([summary_table, Spacer(1, 8), Paragraph("全局参数波动", styles["h1"])])
 
-    case_rows = [["case_id", "状态", "已识别期相", "缺失期相", "问题"]]
+    variation_rows = [["参数字段", "不同取值数", "主要取值（前 5 个）"]]
+    for tag, data in summary["parameter_variation"].items():
+        top_values = ", ".join(
+            f"{item['value']} ({item['series_count']})"
+            for item in data["top_values"][:5]
+        )
+        variation_rows.append([tag, str(data["distinct_value_count"]), top_values or "无"])
+    variation_table = LongTable(
+        variation_rows,
+        colWidths=[42 * mm, 22 * mm, 110 * mm],
+        repeatRows=1,
+    )
+    variation_table.setStyle(_table_style())
+    story.extend([variation_table, Spacer(1, 8), Paragraph("批次概览", styles["h1"])])
+
+    batch_rows = [["batch_id", "series 数", "case 数", "代表参数"]]
+    for batch in batches:
+        batch_rows.append(
+            [
+                batch["batch_id"],
+                str(batch["series_count"]),
+                str(batch["case_count"]),
+                format_mapping(batch["representative_values"]),
+            ]
+        )
+    batch_table = LongTable(
+        batch_rows,
+        colWidths=[20 * mm, 16 * mm, 16 * mm, 122 * mm],
+        repeatRows=1,
+    )
+    batch_table.setStyle(_table_style())
+    story.extend([batch_table, PageBreak(), Paragraph("病例概览", styles["h1"])])
+
+    case_rows = [["case_id", "series 数", "批次数", "batch_ids", "波动字段", "问题"]]
     for case in cases:
         case_rows.append(
             [
                 case["case_id"],
-                severity_label(case["severity"]),
-                format_case_phases(case),
-                ", ".join(case["missing_phases"]) if case["missing_phases"] else "无",
-                format_case_issue_list(case),
+                str(case["series_count"]),
+                str(case["batch_count"]),
+                ", ".join(case["batch_ids"]) or "无",
+                ", ".join(case["varying_fields"]) or "无",
+                format_issue_list(case["within_series_issues"]),
             ]
         )
     case_table = LongTable(
         case_rows,
-        colWidths=[20 * mm, 16 * mm, 40 * mm, 32 * mm, 72 * mm],
+        colWidths=[16 * mm, 14 * mm, 14 * mm, 22 * mm, 46 * mm, 62 * mm],
         repeatRows=1,
     )
     case_table.setStyle(_table_style())
     story.extend([case_table, PageBreak(), Paragraph("Series 详细结果", styles["h1"])])
 
-    series_rows = [["case_id", "phase", "路径", "文件数", "可读数", "状态", "问题"]]
+    series_rows = [["case_id", "batch_id", "路径", "文件数", "可读数", "series 内波动字段"]]
     for item in series:
         series_rows.append(
             [
                 item["case_id"],
-                item["phase"],
+                item["batch_id"],
                 item["relative_dir"],
                 str(item["file_count"]),
                 str(item["readable_count"]),
-                severity_label(item["severity"]),
-                format_issue_list(item["issues"]),
+                ", ".join(item["varying_parameters"]) or "无",
             ]
         )
     series_table = LongTable(
         series_rows,
-        colWidths=[16 * mm, 20 * mm, 62 * mm, 14 * mm, 14 * mm, 16 * mm, 48 * mm],
+        colWidths=[14 * mm, 16 * mm, 88 * mm, 14 * mm, 14 * mm, 42 * mm],
         repeatRows=1,
     )
     series_table.setStyle(_table_style())
     story.append(series_table)
 
-    if series:
-        story.extend([PageBreak(), Paragraph("逐例详细说明", styles["h1"])])
-        for item in series:
-            details = [
-                f"<b>case_id：</b>{item['case_id']}",
-                f"<b>phase：</b>{item['phase']} ({item['phase_source']})",
-                f"<b>路径：</b>{item['relative_dir']}",
-                f"<b>状态：</b>{severity_label(item['severity'])}",
-                f"<b>文件数 / 可读数：</b>{item['file_count']} / {item['readable_count']}",
-                f"<b>SeriesDescription：</b>{item['series_description'] or '无'}",
-                f"<b>ManufacturerModelName：</b>{item['manufacturer_model_name'] or '无'}",
-                f"<b>ConvolutionKernel：</b>{item['convolution_kernel'] or '无'}",
-                f"<b>PixelSpacing：</b>{', '.join(item['pixel_spacing_unique']) or '无'}",
-                f"<b>SliceThickness：</b>{', '.join(item['slice_thickness_unique']) or '无'}",
-                f"<b>问题：</b>{format_issue_list(item['issues'])}",
-            ]
-            story.append(Paragraph(" / ".join(details), styles["small"]))
+    if batches:
+        story.extend([PageBreak(), Paragraph("批次详细说明", styles["h1"])])
+        for batch in batches:
+            story.append(
+                Paragraph(
+                    f"<b>{batch['batch_id']}</b> / series={batch['series_count']} / case={batch['case_count']} / "
+                    f"{format_mapping(batch['representative_values'])}",
+                    styles["small"],
+                )
+            )
             story.append(Spacer(1, 4))
 
     doc.build(story)

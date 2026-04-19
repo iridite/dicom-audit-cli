@@ -9,8 +9,9 @@
 主输入是一个根目录。工具会递归扫描下面的 DICOM 文件，自动完成：
 
 - 目录与文件发现
-- series 级技术完整性检查
-- case 级三期完整性归并
+- series 级参数一致性检查
+- 参数签名分批
+- case 级参数波动归并
 - JSON 报告输出
 - Markdown 报告输出
 - PDF 报告输出
@@ -85,13 +86,34 @@ python -m dicom_audit_cli --root "D:\CT_Study_Export"
 - `dicom_audit_report.md`
 - `dicom_audit_report.pdf`
 
-## 当前默认期相映射
+## 当前默认分批逻辑
 
-- `AP -> arterial`
-- `PVP -> portal`
-- `NC -> noncontrast`
+工具默认根据较稳定的 DICOM 参数签名进行分批，包括：
 
-如果目录命名不同，可通过 `--phase-alias` 补充。
+- `Modality`
+- `Manufacturer`
+- `ManufacturerModelName`
+- `Rows`
+- `Columns`
+- `PixelSpacing`
+- `SliceThickness`
+- `ImageOrientationPatient`
+- `ConvolutionKernel`
+- `KVP`
+
+注意：
+
+- `batch` 只根据参数签名划分
+- 不根据病例号、目录名、期相名划分
+- 如果你要自定义分批字段，可以重复传 `--batch-field`
+
+输出报告会回答：
+
+- 一共有多少个参数批次
+- 每个批次覆盖多少个 series / case
+- 每个病例内部涉及几个批次
+- 哪些参数字段在整体扫描中有波动
+- 哪些病例存在明显的参数变档
 
 ## Windows EXE 打包
 

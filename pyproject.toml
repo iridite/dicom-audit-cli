@@ -1,6 +1,6 @@
 [project]
 name = "dicom-audit-cli"
-version = "1.0.0"
+version = "1.1.0"
 description = "Independent recursive DICOM audit CLI that outputs JSON, Markdown, PDF, and Windows EXE builds."
 readme = "README.md"
 requires-python = ">=3.11"
