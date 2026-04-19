@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
 
     write_json_report(json_path, payload)
     write_markdown_report(md_path, payload)
-    write_typst_report(typ_path, json_path)
+    write_typst_report(typ_path, payload)
 
     typst_binary = find_typst_binary(args.typst_binary)
     pdf_status = "skipped (typst not found)"
