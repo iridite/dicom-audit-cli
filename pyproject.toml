@@ -1,0 +1,26 @@
+[project]
+name = "dicom-audit-cli"
+version = "1.0.0"
+description = "Independent recursive DICOM audit CLI that outputs JSON, Markdown, PDF, and Windows EXE builds."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydicom>=3.0.1",
+  "reportlab>=4.2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pyinstaller>=6.19.0",
+  "pypdf>=5.4.0",
+]
+
+[project.scripts]
+dicom-audit = "dicom_audit_cli.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dicom_audit_cli"]
