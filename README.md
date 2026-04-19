@@ -57,22 +57,22 @@ python -m dicom_audit_cli --root "D:\CT_Study_Export"
 ```powershell
 .\dicom-audit.exe `
   --root "D:\CT_Study_Export" `
-  --output-dir ".\output\audit_001" `
-  --title "DICOM 技术完整性审计报告" `
+  --output-dir ".\output\20260419_140000" `
+  --title "DICOM 参数一致性审计报告" `
   --modality CT `
-  --phase-alias AP=arterial `
-  --phase-alias PVP=portal `
-  --phase-alias NC=noncontrast
+  --batch-field Manufacturer `
+  --batch-field PixelSpacing `
+  --batch-field SliceThickness
 ```
 
 ## 参数说明
 
 - `--root`：必填，递归扫描的根目录
-- `--output-dir`：输出目录，默认当前工作目录下生成时间戳目录
+- `--output-dir`：输出目录；不传时默认生成到 `output\<时间戳>`
 - `--title`：报告标题
-- `--modality`：期望模态，默认 `CT`
-- `--expected-phases`：期望期相，默认 `arterial,portal,noncontrast`
-- `--phase-alias`：自定义期相别名，例如 `AP=arterial`
+- `--modality`：可选模态过滤，例如 `CT`
+- `--batch-field`：用于定义参数批次的 DICOM tag，可重复传入
+- `--critical-tag`：关键检查字段，可重复传入
 - `--exclude-dir`：递归扫描时跳过的目录名，可重复传入
 - `--suffix`：候选文件后缀，默认 `.dcm`
 - `--all-files`：不按后缀过滤，尝试读取全部文件

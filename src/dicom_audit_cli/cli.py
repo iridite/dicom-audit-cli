@@ -80,7 +80,12 @@ def ensure_output_dir(raw_output_dir: str | None) -> Path:
         output_dir = Path(raw_output_dir).expanduser().resolve()
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = (Path.cwd() / "output" / f"dicom_audit_{stamp}").resolve()
+        base_dir = (Path.cwd() / "output").resolve()
+        output_dir = base_dir / stamp
+        counter = 1
+        while output_dir.exists():
+            output_dir = base_dir / f"{stamp}_{counter:02d}"
+            counter += 1
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 
