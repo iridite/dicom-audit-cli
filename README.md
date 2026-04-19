@@ -4,7 +4,7 @@
 
 - Python CLI
 - Windows 单文件 `exe`
-- JSON / Markdown / PDF 报告输出
+- JSON / Markdown / Typst / PDF 报告输出
 
 主输入是一个根目录。工具会递归扫描下面的 DICOM 文件，自动完成：
 
@@ -14,7 +14,8 @@
 - case 级参数波动归并
 - JSON 报告输出
 - Markdown 报告输出
-- PDF 报告输出
+- Typst 报告输出
+- PDF 报告输出（通过 Typst 编译）
 
 ## 适用场景
 
@@ -26,7 +27,7 @@
 
 ### 1. Windows 直接运行 EXE
 
-发布版会提供 `dicom-audit.exe`，医生电脑上不需要安装 Python。
+发布版会提供 `dicom-audit.exe`。如果同目录下有 `typst.exe`，工具会自动编译 PDF。
 
 ```powershell
 .\dicom-audit.exe --root "D:\CT_Study_Export"
@@ -70,6 +71,7 @@ python -m dicom_audit_cli --root "D:\CT_Study_Export"
 - `--root`：必填，递归扫描的根目录
 - `--output-dir`：输出目录；不传时默认生成到 `output\<时间戳>`
 - `--title`：报告标题
+- `--typst-binary`：可选，手动指定 `typst.exe` 路径
 - `--modality`：可选模态过滤，例如 `CT`
 - `--batch-field`：用于定义参数批次的 DICOM tag，可重复传入
 - `--critical-tag`：关键检查字段，可重复传入
@@ -84,7 +86,8 @@ python -m dicom_audit_cli --root "D:\CT_Study_Export"
 
 - `dicom_audit_report.json`
 - `dicom_audit_report.md`
-- `dicom_audit_report.pdf`
+- `dicom_audit_report.typ`
+- `dicom_audit_report.pdf`（找到 Typst 时）
 
 ## 当前默认分批逻辑
 
@@ -127,11 +130,18 @@ python -m dicom_audit_cli --root "D:\CT_Study_Export"
 
 - `dist\dicom-audit.exe`
 
+如果需要本地自动出 PDF，确保以下任一条件成立：
+
+- `typst.exe` 在 PATH 里
+- 启动命令中显式传 `--typst-binary`
+- `typst.exe` 与 `dicom-audit.exe` 位于同一目录
+
 ## 当前验证
 
 该版本已经在 Windows 上做过真实目录扫描验证，并成功生成：
 
 - JSON 报告
 - Markdown 报告
+- Typst 报告
 - PDF 报告
 - 单文件 `exe`

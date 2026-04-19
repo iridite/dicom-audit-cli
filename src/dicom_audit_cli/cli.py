@@ -13,9 +13,11 @@ from dicom_audit_cli.audit import (
 )
 from dicom_audit_cli.reporting import (
     build_payload,
+    compile_typst_pdf,
+    find_typst_binary,
     write_json_report,
     write_markdown_report,
-    write_pdf_report,
+    write_typst_report,
 )
 
 
@@ -32,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--title",
         default="DICOM 参数一致性审计报告",
         help="Report title.",
+    )
+    parser.add_argument(
+        "--typst-binary",
+        help="Optional path to typst executable. If omitted, the tool searches PATH and the current executable directory.",
     )
     parser.add_argument(
         "--modality",
@@ -126,11 +132,18 @@ def main(argv: list[str] | None = None) -> int:
 
     json_path = output_dir / "dicom_audit_report.json"
     md_path = output_dir / "dicom_audit_report.md"
+    typ_path = output_dir / "dicom_audit_report.typ"
     pdf_path = output_dir / "dicom_audit_report.pdf"
 
     write_json_report(json_path, payload)
     write_markdown_report(md_path, payload)
-    write_pdf_report(pdf_path, payload)
+    write_typst_report(typ_path, json_path)
+
+    typst_binary = find_typst_binary(args.typst_binary)
+    pdf_status = "skipped (typst not found)"
+    if typst_binary:
+        compile_typst_pdf(typst_binary, typ_path, pdf_path)
+        pdf_status = str(pdf_path)
 
     print(f"root={root}")
     print(f"total_candidate_files={summary.total_candidate_files}")
@@ -139,5 +152,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"total_batches={summary.total_batches}")
     print(f"json_report={json_path}")
     print(f"markdown_report={md_path}")
-    print(f"pdf_report={pdf_path}")
+    print(f"typst_report={typ_path}")
+    print(f"pdf_report={pdf_status}")
     return 0

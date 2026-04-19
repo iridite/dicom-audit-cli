@@ -1,6 +1,7 @@
 @echo off
 setlocal
 set REPO_DIR=%~dp0.
+if exist "%REPO_DIR%\dist\dicom-audit.exe" del /f /q "%REPO_DIR%\dist\dicom-audit.exe"
 uv run --project "%REPO_DIR%" --group dev pyinstaller ^
   --clean ^
   --noconfirm ^
